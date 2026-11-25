@@ -23,8 +23,11 @@
     that hosts it), without an SDL window: SDL's UIKit backend owns the application's UIWindow, which an app extension
     doesn't have. The component draws into a UIView of its own, added to the host's, with the Metal graphics context
     (a CAMetalLayer in that view), on the main thread at the display's refresh (CADisplayLink); the view's touches are
-    its mouse events (the first finger: down, drag, up, double click). ComponentNative::createFor makes one on iOS
-    when it's given a parent.
+    its mouse events (the first finger: down, drag, up, double click; held still for longPressMs, the press becomes a
+    right click, as iOS opens a context menu: the left press is cancelled, then the right button goes down and up). Text input is the on-screen keyboard: the view
+    is the first responder while a TextInputTarget takes text (startTextInput), its typed text goes to that component
+    and Delete and Return to the focused one as Backspace and Enter. Popup menus open inside the editor (PopupMenu:
+    no windows of their own on iOS). ComponentNative::createFor makes one on iOS when it's given a parent.
 */
 
 namespace yup
@@ -32,8 +35,9 @@ namespace yup
 class UIKitComponentNative;
 } // namespace yup
 
-@interface YupUIKitComponentView : UIView
+@interface YupUIKitComponentView : UIView <UIKeyInput>
 @property (nonatomic, assign) yup::UIKitComponentNative* owner;
+@property (nonatomic, assign) BOOL acceptsText;
 @end
 
 @interface YupUIKitDisplayLinkTarget : NSObject
@@ -55,6 +59,10 @@ public:
         , shouldRenderContinuous (options.flags.test (renderContinuous))
         , screenBounds (component.getBounds().to<int>())
     {
+        // The reference createUIKitComponentNative's Ptr adopts (as SDLComponentNative's): without it a copy of the Ptr
+        // (the long press's) would delete the native when it goes
+        incReferenceCount();
+
         Desktop::getInstance()->registerNativeComponent (this);
 
         UIView* parentView = (__bridge UIView*) parent;
@@ -182,7 +190,51 @@ public:
 
     //==============================================================================
 
-    void setFocusedComponent (Component* comp, FocusChangeType) override { focusedComponent = comp; }
+    //! As SDLComponentNative's: the components hear their focus change (a TextEditor's focus starts its text input),
+    //! and text input stops when the focus goes to a component that takes none
+    void setFocusedComponent (Component* comp, FocusChangeType cause) override
+    {
+        if (focusedComponent == comp)
+            return;
+
+        auto compBailOut = Component::BailOutChecker (comp);
+        WeakReference<Component> previous (focusedComponent.get());
+        const bool previousWantsText = previous != nullptr && dynamic_cast<TextInputTarget*> (previous.get()) != nullptr;
+
+        if (auto* old = previous.get())
+        {
+            auto focusBailOut = Component::BailOutChecker (old);
+            old->internalFocusChanged (false);
+
+            if (! focusBailOut.shouldBailOut())
+                old->repaint();
+        }
+
+        if (compBailOut.shouldBailOut())
+            comp = nullptr;
+
+        focusedComponent = comp;
+
+        if (previous != nullptr)
+            previous->internalFocusOfComponentChanged (cause);
+
+        const bool newWantsText = comp != nullptr && dynamic_cast<TextInputTarget*> (comp) != nullptr;
+
+        if (previousWantsText && ! newWantsText && previous != nullptr)
+            stopTextInput (*previous);
+
+        if (auto* focused = focusedComponent.get())
+        {
+            auto focusBailOut = Component::BailOutChecker (focused);
+            focused->internalFocusChanged (true);
+
+            if (! focusBailOut.shouldBailOut())
+            {
+                focused->repaint();
+                focused->internalFocusOfComponentChanged (cause);
+            }
+        }
+    }
     Component* getFocusedComponent() const override { return focusedComponent.get(); }
     Component* getPointerTarget() const override { return clickedComponent.get(); }
 
@@ -214,10 +266,52 @@ public:
         clickedComponent = nullptr;
     }
 
-    // Text input: not yet (the on-screen keyboard)
-    void startTextInput (Component&) override {}
-    void stopTextInput (Component&) override {}
+    // Text input: the on-screen keyboard while the view is the first responder
+    void startTextInput (Component& textComponent) override
+    {
+        if (dynamic_cast<TextInputTarget*> (std::addressof (textComponent)) == nullptr)
+            return;
+
+        currentTextInputComponent = std::addressof (textComponent);
+        view.acceptsText = YES;
+
+        if (! view.isFirstResponder)
+            [view becomeFirstResponder];
+    }
+
+    void stopTextInput (Component& textComponent) override
+    {
+        if (currentTextInputComponent.get() != std::addressof (textComponent))
+            return;
+
+        currentTextInputComponent = nullptr;
+        view.acceptsText = NO;
+
+        if (view.isFirstResponder)
+            [view resignFirstResponder];
+    }
+
     void updateTextInputRect (Component&) override {}
+
+    void handleTextInput (const String& text)
+    {
+        if (auto* target = currentTextInputComponent.get())
+            target->internalTextInput (text);
+    }
+
+    void handleKey (int keyCode)
+    {
+        auto* target = focusedComponent != nullptr ? focusedComponent.get() : std::addressof (component);
+        const auto key = KeyPress (keyCode);
+        auto bailOut = Component::BailOutChecker (target);
+
+        target->internalKeyDown (key, lastPosition);
+
+        if (! bailOut.shouldBailOut())
+            target->internalKeyUp (key, lastPosition);
+    }
+
+    bool hasTextInput() const { return currentTextInputComponent != nullptr; }
 
     float getScaleDpi() const override
     {
@@ -266,19 +360,24 @@ public:
         switch (phase)
         {
             case UITouchPhaseBegan:
+                longPressRightClick = false;
                 handleMouseDown (position);
                 break;
 
             case UITouchPhaseMoved:
-                handleMouseDrag (position);
+                if (! longPressRightClick)
+                    handleMouseDrag (position);
                 break;
 
             case UITouchPhaseEnded:
-                handleMouseUp (position, false);
-                break;
-
             case UITouchPhaseCancelled:
-                handleMouseUp (position, true);
+                // A long press already ended as a right click
+                ++currentPressId;
+
+                if (! longPressRightClick)
+                    handleMouseUp (position, phase == UITouchPhaseCancelled);
+
+                longPressRightClick = false;
                 break;
 
             default:
@@ -288,6 +387,13 @@ public:
 
     void renderFrame()
     {
+        // The component that took text went away without giving it up (an inline editor deleted): the keyboard goes
+        if (currentTextInputComponent == nullptr && view.isFirstResponder)
+        {
+            view.acceptsText = NO;
+            [view resignFirstResponder];
+        }
+
         YUP_TRY
         {
             if (renderInternal())
@@ -375,8 +481,24 @@ private:
         return MouseEvent().withButtons (buttons).withPosition (position).withTouchIndex (0);
     }
 
+    static constexpr int longPressMs = 500;
+    static constexpr float longPressSlop = 8.0f;
+
     void handleMouseDown (const Point<float>& position)
     {
+        // A press held still becomes a right click
+        const auto pressId = ++currentPressId;
+        longPressPosition = position;
+        longPressMoved = false;
+
+        // The native stays alive until the call (reference counted); its view gone, the press is over
+        Timer::callAfterDelay (longPressMs, [keepAlive = ComponentNative::Ptr (this), self = this, pressId,
+                                             owner = WeakReference<Component> (std::addressof (component))]
+        {
+            if (owner != nullptr && self->view != nil && self->currentPressId == pressId && ! self->longPressMoved && self->clickedComponent != nullptr)
+                self->handleLongPress();
+        });
+
         clickedComponent = component.findComponentAtForMouseEvent (position);
 
         auto event = makeEvent (position, MouseEvent::leftButton);
@@ -393,8 +515,33 @@ private:
         }
     }
 
+    void handleLongPress()
+    {
+        const auto position = longPressPosition;
+        handleMouseUp (position, true);
+        ++currentPressId;
+        longPressRightClick = true;
+
+        auto* target = component.findComponentAtForMouseEvent (position);
+
+        if (target == nullptr)
+            return;
+
+        auto bailOut = Component::BailOutChecker (target);
+        auto event = makeEvent (position, MouseEvent::rightButton).withSourceComponent (target);
+
+        Desktop::getInstance()->handleGlobalMouseDown (MouseEvent (MouseEvent::rightButton, KeyModifiers(), component.localToScreen (position)).withTouchIndex (0));
+        target->internalMouseDown (event.withRelativePositionTo (target));
+
+        if (! bailOut.shouldBailOut())
+            target->internalMouseUp (makeEvent (position, MouseEvent::noButtons).withSourceComponent (target).withRelativePositionTo (target));
+    }
+
     void handleMouseDrag (const Point<float>& position)
     {
+        if (position.distanceTo (longPressPosition) > longPressSlop)
+            longPressMoved = true;
+
         auto event = makeEvent (position, MouseEvent::leftButton);
 
         if (lastMouseDownPosition)
@@ -508,10 +655,15 @@ private:
     float currentFrameRate = 0.0f;
 
     WeakReference<Component> focusedComponent;
+    WeakReference<Component> currentTextInputComponent;
     WeakReference<Component> clickedComponent;
     WeakReference<Component> componentUnderTouch;
     WeakReference<Component> lastClickComponent;
     Point<float> lastPosition;
+    int currentPressId = 0;
+    Point<float> longPressPosition;
+    bool longPressMoved = false;
+    bool longPressRightClick = false;
     std::optional<Point<float>> lastMouseDownPosition;
     std::optional<Time> lastMouseDownTime;
     std::optional<Point<float>> lastClickPosition;
@@ -530,6 +682,50 @@ ComponentNative::Ptr createUIKitComponentNative (Component& component, const Com
 //==============================================================================
 
 @implementation YupUIKitComponentView
+
+// The on-screen keyboard (UIKeyInput), while a component takes text
+
+- (BOOL)canBecomeFirstResponder
+{
+    return self.acceptsText;
+}
+
+- (BOOL)hasText
+{
+    return YES;
+}
+
+- (void)insertText:(NSString*)text
+{
+    if (self.owner == nullptr)
+        return;
+
+    if ([text isEqualToString:@"\n"])
+        self.owner->handleKey (yup::KeyPress::enterKey);
+    else
+        self.owner->handleTextInput (yup::String::fromUTF8 ([text UTF8String]));
+}
+
+- (void)deleteBackward
+{
+    if (self.owner != nullptr)
+        self.owner->handleKey (yup::KeyPress::backspaceKey);
+}
+
+- (UITextAutocorrectionType)autocorrectionType
+{
+    return UITextAutocorrectionTypeNo;
+}
+
+- (UITextAutocapitalizationType)autocapitalizationType
+{
+    return UITextAutocapitalizationTypeNone;
+}
+
+- (UIReturnKeyType)returnKeyType
+{
+    return UIReturnKeyDone;
+}
 
 - (void)layoutSubviews
 {

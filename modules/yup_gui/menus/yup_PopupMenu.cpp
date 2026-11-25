@@ -795,6 +795,13 @@ void PopupMenu::showCustom (const Options& options, bool isSubmenu, std::functio
     this->options = options;
     menuCallback = std::move (callback);
 
+#if YUP_IOS
+    // No windows of its own on iOS (an embedded editor has no SDL window): a menu shown relative to a component opens
+    // inside that component's top-level component
+    if (this->options.parentComponent == nullptr && this->options.targetComponent != nullptr)
+        this->options.parentComponent = this->options.targetComponent->getTopLevelComponent();
+#endif
+
     if (! isSubmenu)
         focusComponentToRestore = getFocusComponentForDismissal();
 
