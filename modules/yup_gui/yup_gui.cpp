@@ -310,3 +310,6 @@
 #include "native/yup_Windowing_sdl.cpp"
 #include "native/yup_Desktop_sdl.cpp"
 #include "native/yup_Initialisation_sdl.cpp"
+#if YUP_IOS
+#include "native/yup_Windowing_uikit.mm"
+#endif

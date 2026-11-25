@@ -3667,10 +3667,20 @@ void SDLComponentNative::releaseMouseCapture()
 
 //==============================================================================
 
+#if YUP_IOS
+// An embedded component on iOS has no SDL window: yup_Windowing_uikit.mm
+ComponentNative::Ptr createUIKitComponentNative (Component& component, const ComponentNative::Options& options, void* parent);
+#endif
+
 ComponentNative::Ptr ComponentNative::createFor (Component& component,
                                                  const Options& options,
                                                  void* parent)
 {
+#if YUP_IOS
+    if (parent != nullptr)
+        return createUIKitComponentNative (component, options, parent);
+#endif
+
     return ComponentNative::Ptr (ReferenceCountedObjectAdopt, new SDLComponentNative (component, options, parent));
 }
 

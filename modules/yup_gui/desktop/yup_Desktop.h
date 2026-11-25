@@ -245,6 +245,7 @@ public:
 private:
     friend class YUPApplication;
     friend class SDLComponentNative;
+    friend class UIKitComponentNative;
 
     Desktop();
 
