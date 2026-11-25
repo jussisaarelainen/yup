@@ -266,7 +266,7 @@ YUP_API void YUP_CALLTYPE Process::hide()
 #if YUP_MAC
         [NSApp hide:nil];
 #elif YUP_IOS
-        [[UIApplication sharedApplication] performSelector:@selector(suspend)];
+        [((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]) performSelector:@selector(suspend)];
 #endif
     }
 }

@@ -68,7 +68,7 @@ void MessageManager::stopDispatchLoop()
         func();
 
     if (!SystemStats::isRunningInAppExtensionSandbox())
-        [[[UIApplication sharedApplication] delegate] applicationWillTerminate:[UIApplication sharedApplication]];
+        [[((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]) delegate] applicationWillTerminate:((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)])];
 
 #if YUP_SHUTDOWN_APP_ON_MESSAGEMANAGER_QUIT
     exit(0); // iOS apps get no mercy..

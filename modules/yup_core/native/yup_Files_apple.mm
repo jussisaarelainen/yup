@@ -150,7 +150,7 @@ bool openDocument(const String& fileName, const String& parameters, const Array<
 
         if (@available(iOS 10.0, *))
         {
-            [[UIApplication sharedApplication] openURL:filenameAsURL
+            [((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]) openURL:filenameAsURL
                                                options:@{}
                                      completionHandler:nil];
 
@@ -158,7 +158,7 @@ bool openDocument(const String& fileName, const String& parameters, const Array<
         }
 
         YUP_BEGIN_IGNORE_DEPRECATION_WARNINGS
-        return [[UIApplication sharedApplication] openURL:filenameAsURL];
+        return [((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]) openURL:filenameAsURL];
         YUP_END_IGNORE_DEPRECATION_WARNINGS
 
 #else

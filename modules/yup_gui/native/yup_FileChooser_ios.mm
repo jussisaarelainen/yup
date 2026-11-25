@@ -212,7 +212,7 @@ void FileChooser::showPlatformDialog(CompletionCallback callback, int flags)
         UIWindow* keyWindow = nil;
         if (@available(iOS 13.0, *))
         {
-            for (UIWindowScene* windowScene in [UIApplication sharedApplication].connectedScenes)
+            for (UIWindowScene* windowScene in ((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]).connectedScenes)
             {
                 if (windowScene.activationState != UISceneActivationStateForegroundActive)
                     continue;
@@ -234,7 +234,7 @@ void FileChooser::showPlatformDialog(CompletionCallback callback, int flags)
         if (keyWindow == nil)
         {
             YUP_BEGIN_IGNORE_DEPRECATION_WARNINGS
-            keyWindow = [UIApplication sharedApplication].keyWindow;
+            keyWindow = ((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]).keyWindow;
             YUP_END_IGNORE_DEPRECATION_WARNINGS
         }
 

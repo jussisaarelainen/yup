@@ -790,7 +790,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
 
             if (@available (iOS 10.0, *))
             {
-                [[UIApplication sharedApplication] openURL:hostNSURL
+                [((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]) openURL:hostNSURL
                                                    options:@{}
                                          completionHandler:nil];
 
@@ -798,7 +798,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
             }
 
             YUP_BEGIN_IGNORE_DEPRECATION_WARNINGS
-            [[UIApplication sharedApplication] openURL:hostNSURL];
+            [((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]) openURL:hostNSURL];
             YUP_END_IGNORE_DEPRECATION_WARNINGS
         }
     }
@@ -899,7 +899,7 @@ struct iOSAudioIODevice::Pimpl final : public AsyncUpdater
 
             interAppAudioConnected = connected;
 
-            UIApplicationState appstate = [UIApplication sharedApplication].applicationState;
+            UIApplicationState appstate = ((UIApplication*) [UIApplication performSelector:@selector (sharedApplication)]).applicationState;
             bool inForeground = (appstate != UIApplicationStateBackground);
 
             if (interAppAudioConnected || inForeground)
