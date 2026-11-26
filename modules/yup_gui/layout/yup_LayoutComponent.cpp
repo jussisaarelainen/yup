@@ -24,6 +24,7 @@ namespace yup
 
 const Identifier LayoutComponent::Properties::paddingId ("padding");
 const Identifier LayoutComponent::Properties::gapId ("gap");
+const Identifier LayoutComponent::Properties::fitContentId ("fitContent");
 const Identifier LayoutComponent::Properties::directionId ("direction");
 const Identifier LayoutComponent::Properties::wrapId ("wrap");
 const Identifier LayoutComponent::Properties::justifyId ("justify");
@@ -109,12 +110,26 @@ float LayoutComponent::getGap() const
     return jmax (0.0f, findPropertyAs<float> (Properties::gapId));
 }
 
+void LayoutComponent::setFitContent (bool shouldFitContent)
+{
+    setProperty (Properties::fitContentId, shouldFitContent);
+}
+
+bool LayoutComponent::getFitContent() const
+{
+    return findPropertyAs<bool> (Properties::fitContentId);
+}
+
 //==============================================================================
 
 void LayoutComponent::updateLayout()
 {
+    // Asked again while laying out (a child that fits its content changed its preferred size): once more after
     if (isPerformingLayout)
+    {
+        isLayoutPending = true;
         return;
+    }
 
     if (auto& held = getHeldLayouts(); held.numBatches > 0)
     {
@@ -127,7 +142,40 @@ void LayoutComponent::updateLayout()
     isLayoutHeld = false;
 
     const ScopedValueSetter<bool> scope (isPerformingLayout, true);
-    performLayout (getLocalBounds().reduced (getPadding()));
+
+    // A few passes at most: each one only follows sizes the previous one changed
+    for (int pass = 0; pass < 4; ++pass)
+    {
+        isLayoutPending = false;
+
+        // The parent lays out again with the new preferred size, giving this container its bounds before its own layout
+        fitToContent();
+
+        performLayout (getLocalBounds().reduced (getPadding()));
+
+        if (! isLayoutPending)
+            break;
+    }
+}
+
+void LayoutComponent::fitToContent()
+{
+    if (! getFitContent())
+        return;
+
+    const auto content = measureContent();
+    if (! content.has_value())
+        return;
+
+    const auto padding = getPadding();
+    const auto width = static_cast<double> (content->getWidth() + padding.getLeft() + padding.getRight());
+    const auto height = static_cast<double> (content->getHeight() + padding.getTop() + padding.getBottom());
+
+    if (findPropertyAs<double> (Properties::preferredWidthId) != width)
+        setProperty (Properties::preferredWidthId, width);
+
+    if (findPropertyAs<double> (Properties::preferredHeightId) != height)
+        setProperty (Properties::preferredHeightId, height);
 }
 
 //==============================================================================
@@ -140,6 +188,7 @@ const ComponentTypeInfo& LayoutComponent::getClassTypeInfo()
     static const auto info = ComponentTypeBuilder<LayoutComponent> (Identifier ("Layout"))
                                  .layoutProperty (Properties::paddingId, Type::any, 0.0, LayoutEffect::own, "The space kept inside the bounds: a number, or 1, 2 or 4 values (top right bottom left).")
                                  .layoutProperty (Properties::gapId, Type::number, 0.0, LayoutEffect::own, "The space kept between the children.")
+                                 .layoutProperty (Properties::fitContentId, Type::boolean, false, LayoutEffect::own, "Whether the container sets its preferred size to what its children need, plus its padding.")
                                  .build();
 
     return info;
@@ -201,6 +250,16 @@ String LayoutComponent::getItemString (const Component& child, const Identifier&
 EdgeSpacing<float> LayoutComponent::getItemMargin (const Component& child)
 {
     return parseSpacing (child.findProperty (Properties::marginId));
+}
+
+Size<float> LayoutComponent::getMeasuredItemSize (const Component& child)
+{
+    const auto preferredWidth = getItemNumber (child, Properties::preferredWidthId);
+    const auto preferredHeight = getItemNumber (child, Properties::preferredHeightId);
+    const auto margin = getItemMargin (child);
+
+    return { (preferredWidth >= 0.0f ? preferredWidth : child.getWidth()) + margin.getLeft() + margin.getRight(),
+             (preferredHeight >= 0.0f ? preferredHeight : child.getHeight()) + margin.getTop() + margin.getBottom() };
 }
 
 EdgeSpacing<float> LayoutComponent::parseSpacing (const var& value)

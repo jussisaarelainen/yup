@@ -226,6 +226,10 @@ DrawingScope::ResolvedProperty DrawingScope::resolve (const ParsedInput& input) 
             if (target == nullptr)
                 return {};
 
+            // A model can expose a value it doesn't list: it's asked for it by name
+            if (auto* model = dynamic_cast<BindingModel*> (target))
+                model->ensureProperty (input.property);
+
             const auto* descriptor = target->getTypeInfo().findProperty (input.property);
             return descriptor != nullptr ? ResolvedProperty { target, descriptor } : ResolvedProperty {};
         }

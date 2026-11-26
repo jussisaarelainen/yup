@@ -1637,8 +1637,8 @@ void YuiBuilder::applyLink (Component& component, const Value& link, Scope& scop
     const auto& sourceProperty = split->second;
 
     auto* model = dynamic_cast<BindingModel*> (source);
-    if (model != nullptr && source->getTypeInfo().findProperty (sourceProperty) == nullptr)
-        model->refreshProperties();
+    if (model != nullptr)
+        model->ensureProperty (sourceProperty);
 
     if (source->getTypeInfo().findProperty (sourceProperty) == nullptr)
     {

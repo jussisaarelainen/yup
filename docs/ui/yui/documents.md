@@ -338,6 +338,11 @@ YuiDocument document;
 document.setModel ("params", provider);
 ```
 
+A provider can also expose values it doesn't list, such as values it only
+finds by name, or makes when they are first asked for: an expression or a link
+that reads `params.cutoff` asks the provider's `findProperty` for `cutoff` when
+`getProperties` doesn't list it, and the model keeps it from then on.
+
 Set models before loading. The data lives outside the document, so values
 survive any reload, even one that creates the components again, and changes
 made to the tree by anything else, such as undo or loading a preset, show up in

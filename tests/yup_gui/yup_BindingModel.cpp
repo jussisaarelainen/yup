@@ -68,6 +68,31 @@ protected:
         StringArray endedGestures;
     };
 
+    /** Lists nothing, and finds its values by name only, as a provider of many or lazily made values does. */
+    class FindByNameProvider final : public BindingProvider
+    {
+    public:
+        std::vector<Property> getProperties() const override { return {}; }
+
+        std::optional<Property> findProperty (const Identifier& name) const override
+        {
+            if (values.contains (name))
+                return Property { name, ComponentProperty::Type::number };
+
+            return std::nullopt;
+        }
+
+        var getValue (const Identifier& name) const override { return values.getWithDefault (name, {}); }
+
+        void setValue (const Identifier& name, const var& value) override
+        {
+            if (values.set (name, value))
+                notifyValueChanged (name);
+        }
+
+        NamedValueSet values { { Identifier ("tempo"), 120.0 } };
+    };
+
     class PressableControl final : public Component
     {
     public:
@@ -136,4 +161,36 @@ TEST_F (BindingModelTests, TracksControlPressGesturesAndDetachesWhenProviderOrCo
 
     provider.reset();
     EXPECT_EQ (model.getProvider(), nullptr);
+}
+
+TEST_F (BindingModelTests, FindsAPropertyTheProviderDoesNotList)
+{
+    FindByNameProvider provider;
+    BindingModel model (provider);
+
+    EXPECT_FALSE (model.getTypeInfo().hasProperty (Identifier ("tempo")));
+    EXPECT_FALSE (model.ensureProperty (Identifier ("missing")));
+
+    EXPECT_TRUE (model.ensureProperty (Identifier ("tempo")));
+    EXPECT_TRUE (model.getTypeInfo().hasProperty (Identifier ("tempo")));
+    EXPECT_DOUBLE_EQ (static_cast<double> (model.getProperty (Identifier ("tempo"))), 120.0);
+}
+
+TEST_F (BindingModelTests, BindsAnExpressionToAPropertyTheProviderDoesNotList)
+{
+    FindByNameProvider provider;
+    YuiDocument document;
+    document.setModel ("params", provider);
+
+    const auto result = document.loadFromString (R"yui(
+        Label { id: readout; text: format ("%.0f", params.tempo); }
+    )yui");
+
+    ASSERT_TRUE (result.wasOk()) << result.getErrorMessage();
+    auto* readout = document.findById<Label> ("readout");
+    ASSERT_NE (readout, nullptr);
+    EXPECT_EQ (readout->getText(), "120");
+
+    provider.setValue (Identifier ("tempo"), 90.0);
+    EXPECT_EQ (readout->getText(), "90");
 }

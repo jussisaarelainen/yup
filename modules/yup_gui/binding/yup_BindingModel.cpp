@@ -24,7 +24,7 @@ namespace yup
 
 BindingModel::BindingModel (BindingProvider& providerToUse)
     : provider (&providerToUse)
-    , info (std::make_unique<ComponentTypeInfo> (Identifier ("Model"), nullptr, makeProperties (providerToUse)))
+    , info (std::make_unique<ComponentTypeInfo> (Identifier ("Model"), nullptr, makeProperties (providerToUse, {})))
 {
     provider->addListener (this);
 }
@@ -42,7 +42,29 @@ void BindingModel::refreshProperties()
     if (provider == nullptr)
         return;
 
-    info = std::make_unique<ComponentTypeInfo> (Identifier ("Model"), nullptr, makeProperties (*provider));
+    info = std::make_unique<ComponentTypeInfo> (Identifier ("Model"), nullptr, makeProperties (*provider, foundByName));
+}
+
+bool BindingModel::ensureProperty (const Identifier& name)
+{
+    if (getTypeInfo().findProperty (name) != nullptr)
+        return true;
+
+    if (provider == nullptr)
+        return false;
+
+    const auto found = provider->findProperty (name);
+    if (! found.has_value())
+        return false;
+
+    foundByName.push_back (*found);
+
+    // The bindings resolved so far keep pointing at the descriptors of the previous table
+    auto previous = std::move (info);
+    refreshProperties();
+    retiredInfos.push_back (std::move (previous));
+
+    return getTypeInfo().findProperty (name) != nullptr;
 }
 
 void BindingModel::trackGestures (Component& component, const Identifier& property)
@@ -59,11 +81,17 @@ void BindingModel::stopTrackingGestures()
         stopTracking (*tracked.back().component);
 }
 
-std::vector<ComponentProperty> BindingModel::makeProperties (BindingProvider& provider)
+std::vector<ComponentProperty> BindingModel::makeProperties (BindingProvider& provider, const std::vector<BindingProvider::Property>& foundByName)
 {
     std::vector<ComponentProperty> properties;
 
-    for (const auto& property : provider.getProperties())
+    auto all = provider.getProperties();
+
+    for (const auto& property : foundByName)
+        if (std::none_of (all.begin(), all.end(), [&] (const auto& listed) { return listed.name == property.name; }))
+            all.push_back (property);
+
+    for (const auto& property : all)
     {
         properties.push_back ({
             .name = property.name,
