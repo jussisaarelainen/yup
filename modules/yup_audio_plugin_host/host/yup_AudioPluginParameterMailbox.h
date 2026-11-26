@@ -38,7 +38,10 @@ public:
     {
         valueChanged = 1 << 0,
         gestureBegan = 1 << 1,
-        gestureEnded = 1 << 2
+        gestureEnded = 1 << 2,
+        /** The value comes from the plugin (its output, or a MIDI mapping), so the host's parameter doesn't have it
+            yet; without it the value is the host's own change, which only the plugin's other side needs */
+        valueFromPlugin = 1 << 3
     };
 
     void resize (int newSize)
