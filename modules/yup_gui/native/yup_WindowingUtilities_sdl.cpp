@@ -25,7 +25,200 @@ extern "C"
     struct SDL_VideoDevice;
     SDL_VideoDevice* SDL_GetVideoDevice (void);
     void Cocoa_HandleKeyEvent (SDL_VideoDevice* _this, NSEvent* event);
+    bool SDL_SetKeyboardFocus (SDL_Window* window);
 }
+
+namespace yup
+{
+
+/** True in an out of process plugin host (Apple's AUHostingService, where sandboxed hosts such as Logic Pro load an
+    AUv2): the host shows only the plugin's own view, so a window of the plugin's never appears on screen. The process
+    is recognised by its name: its main bundle can be the host's (Logic Pro's service has com.apple.logic10).
+*/
+bool isHostedOutOfProcess()
+{
+    static const bool hosted = [[[NSProcessInfo processInfo] processName] hasPrefix:@"AUHostingService"];
+    return hosted;
+}
+
+/** Receives the input of the view a NativeParentAttachment draws in when the plugin is hosted out of process. */
+class HostedViewInput
+{
+public:
+    virtual ~HostedViewInput() = default;
+
+    virtual void hostedMouseMoved (Point<float> position) = 0;
+    virtual void hostedMouseDown (Point<float> position, MouseEvent::Buttons button, KeyModifiers modifiers) = 0;
+    virtual void hostedMouseUp (Point<float> position, MouseEvent::Buttons button, KeyModifiers modifiers) = 0;
+    virtual void hostedMouseEntered (Point<float> position) = 0;
+    virtual void hostedMouseExited (Point<float> position) = 0;
+    virtual void hostedMouseWheel (Point<float> position, const MouseWheelData& wheelData) = 0;
+    virtual void hostedKeyEvent (NSEvent* event) = 0;
+    virtual void hostedKeyboardFocusChanged (bool hasFocus) = 0;
+};
+
+} // namespace yup
+
+/** The view in the host's view that an out of process plugin draws in (the Metal layer is its layer) and that takes its
+    input. Objective-C classes are shared by every plugin in the process, whichever image registered them first, so its
+    methods only forward to the owner's HostedViewInput, which runs in the owner's own image.
+*/
+@interface YupHostedParentView : NSView
+{
+@public
+    yup::HostedViewInput* input;
+    NSTrackingArea* trackingArea;
+}
+@end
+
+@implementation YupHostedParentView
+
+- (BOOL)isFlipped
+{
+    return YES;
+}
+
+- (BOOL)acceptsFirstResponder
+{
+    return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent*)event
+{
+    return YES;
+}
+
+- (BOOL)becomeFirstResponder
+{
+    if (input != nullptr)
+        input->hostedKeyboardFocusChanged (true);
+
+    return YES;
+}
+
+- (BOOL)resignFirstResponder
+{
+    if (input != nullptr)
+        input->hostedKeyboardFocusChanged (false);
+
+    return YES;
+}
+
+- (void)updateTrackingAreas
+{
+    if (trackingArea != nil)
+        [self removeTrackingArea:trackingArea];
+
+    trackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                options:NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                                                  owner:self
+                                               userInfo:nil];
+    [self addTrackingArea:trackingArea];
+
+    [super updateTrackingAreas];
+}
+
+- (yup::Point<float>)positionOf:(NSEvent*)event
+{
+    const auto location = [self convertPoint:[event locationInWindow] fromView:nil];
+    return { static_cast<float> (location.x), static_cast<float> (location.y) };
+}
+
+- (yup::KeyModifiers)modifiersOf:(NSEvent*)event
+{
+    const auto flags = [event modifierFlags];
+    int modifiers = 0;
+
+    if ((flags & NSEventModifierFlagControl) != 0)
+        modifiers |= yup::KeyModifiers::controlMask;
+
+    if ((flags & NSEventModifierFlagShift) != 0)
+        modifiers |= yup::KeyModifiers::shiftMask;
+
+    if ((flags & NSEventModifierFlagOption) != 0)
+        modifiers |= yup::KeyModifiers::altMask;
+
+    if ((flags & NSEventModifierFlagCommand) != 0)
+        modifiers |= yup::KeyModifiers::commandMask;
+
+    return modifiers;
+}
+
+- (void)buttonPressed:(NSEvent*)event button:(yup::MouseEvent::Buttons)button
+{
+    [[self window] makeFirstResponder:self];
+
+    if (input != nullptr)
+        input->hostedMouseDown ([self positionOf:event], button, [self modifiersOf:event]);
+}
+
+- (void)buttonReleased:(NSEvent*)event button:(yup::MouseEvent::Buttons)button
+{
+    if (input != nullptr)
+        input->hostedMouseUp ([self positionOf:event], button, [self modifiersOf:event]);
+}
+
+- (void)move:(NSEvent*)event
+{
+    if (input != nullptr)
+        input->hostedMouseMoved ([self positionOf:event]);
+}
+
+// clang-format off
+- (void)mouseDown:(NSEvent*)event         { [self buttonPressed:event button:yup::MouseEvent::leftButton]; }
+- (void)rightMouseDown:(NSEvent*)event    { [self buttonPressed:event button:yup::MouseEvent::rightButton]; }
+- (void)otherMouseDown:(NSEvent*)event    { [self buttonPressed:event button:yup::MouseEvent::middleButton]; }
+- (void)mouseUp:(NSEvent*)event           { [self buttonReleased:event button:yup::MouseEvent::leftButton]; }
+- (void)rightMouseUp:(NSEvent*)event      { [self buttonReleased:event button:yup::MouseEvent::rightButton]; }
+- (void)otherMouseUp:(NSEvent*)event      { [self buttonReleased:event button:yup::MouseEvent::middleButton]; }
+- (void)mouseMoved:(NSEvent*)event        { [self move:event]; }
+- (void)mouseDragged:(NSEvent*)event      { [self move:event]; }
+- (void)rightMouseDragged:(NSEvent*)event { [self move:event]; }
+- (void)otherMouseDragged:(NSEvent*)event { [self move:event]; }
+// clang-format on
+
+- (void)mouseEntered:(NSEvent*)event
+{
+    if (input != nullptr)
+        input->hostedMouseEntered ([self positionOf:event]);
+}
+
+- (void)mouseExited:(NSEvent*)event
+{
+    if (input != nullptr)
+        input->hostedMouseExited ([self positionOf:event]);
+}
+
+- (void)scrollWheel:(NSEvent*)event
+{
+    if (input == nullptr)
+        return;
+
+    // As SDL's Cocoa_HandleMouseWheel
+    float x, y;
+
+    if ([event hasPreciseScrollingDeltas])
+    {
+        x = static_cast<float> (-[event scrollingDeltaX] * 0.1);
+        y = static_cast<float> ([event scrollingDeltaY] * 0.1);
+    }
+    else
+    {
+        const auto round = [] (CGFloat delta) { return static_cast<float> (delta > 0 ? std::ceil (delta) : std::floor (delta)); };
+        x = round (-[event deltaX]);
+        y = round ([event deltaY]);
+    }
+
+    input->hostedMouseWheel ([self positionOf:event], { x, y });
+}
+
+// clang-format off
+- (void)keyDown:(NSEvent*)event      { if (input != nullptr) input->hostedKeyEvent (event); }
+- (void)keyUp:(NSEvent*)event        { if (input != nullptr) input->hostedKeyEvent (event); }
+- (void)flagsChanged:(NSEvent*)event { if (input != nullptr) input->hostedKeyEvent (event); }
+// clang-format on
+
+@end
 #endif
 
 namespace yup
@@ -395,11 +588,19 @@ void focusNativeWindow (void* nativeWindow)
     On macOS a host NSView cannot own another window, so the window becomes a child NSWindow glued over an empty
     placeholder view inserted in the host view. Hosts lay out and resize the placeholder like any embedded plugin view
     (some, like Reaper, require one), and the window follows its frame on screen.
+
+    Hosted out of process (isHostedOutOfProcess) the host shows only the plugin's view, never a window of its own: the
+    placeholder is then a YupHostedParentView, which the component draws in and whose input goes to hostedInput, and
+    the window stays hidden.
 */
 class NativeParentAttachment final : private Timer
 {
 public:
+#if YUP_MAC
+    NativeParentAttachment (void* parent, SDL_Window* window, HostedViewInput* hostedInput)
+#else
     NativeParentAttachment (void* parent, SDL_Window* window)
+#endif
     {
 #if YUP_MAC
         sdlWindow = window;
@@ -413,9 +614,25 @@ public:
         height = jmax (1, height);
 
         const auto originY = [hostView isFlipped] ? 0.0 : NSHeight ([hostView bounds]) - height;
-        placeholder = [[NSView alloc] initWithFrame:NSMakeRect (0, originY, width, height)];
+        const auto frame = NSMakeRect (0, originY, width, height);
+
+        if (hostedInput != nullptr)
+        {
+            auto* view = [[YupHostedParentView alloc] initWithFrame:frame];
+            view->input = hostedInput;
+            hostedView = view;
+            placeholder = view;
+        }
+        else
+        {
+            placeholder = [[NSView alloc] initWithFrame:frame];
+        }
+
         [placeholder setAutoresizingMask:NSViewMaxXMargin | ([hostView isFlipped] ? NSViewMaxYMargin : NSViewMinYMargin)];
         [hostView addSubview:placeholder];
+
+        if (hostedView != nil)
+            return;
 
         auto* center = [NSNotificationCenter defaultCenter];
 
@@ -466,6 +683,9 @@ public:
 
         [observers removeAllObjects];
 
+        if (hostedView != nil)
+            hostedView->input = nullptr;
+
         // Hide before detaching, otherwise the window flashes as a standalone window on the desktop
         if (NSWindow* nsWindow = getNSWindow())
         {
@@ -506,10 +726,42 @@ public:
 #endif
     }
 
+    /** Returns the view the component draws in when hosted out of process, else nullptr. */
+    void* getHostedView() const
+    {
+#if YUP_MAC
+        return (__bridge void*) hostedView;
+#else
+        return nullptr;
+#endif
+    }
+
+    /** Makes the view the component draws in when hosted out of process the first responder, so it takes the keys. */
+    void focusHostedView()
+    {
+#if YUP_MAC
+        if (NSWindow* hostWindow = [hostedView window]; hostWindow != nil && [hostWindow firstResponder] != hostedView)
+            [hostWindow makeFirstResponder:hostedView];
+#endif
+    }
+
+    /** Shows or hides the view the component draws in when hosted out of process. */
+    void setHostedViewVisible (bool shouldBeVisible)
+    {
+#if YUP_MAC
+        [hostedView setHidden:! shouldBeVisible];
+#else
+        ignoreUnused (shouldBeVisible);
+#endif
+    }
+
     /** Moves the window back over its area in the host, after anything might have displaced it. */
     void glue()
     {
 #if YUP_MAC
+        if (hostedView != nil)
+            return;
+
         if (isGluing)
         {
             needsGlue = true;
@@ -576,6 +828,7 @@ private:
 
     SDL_Window* sdlWindow = nullptr;
     NSView* placeholder = nil;
+    YupHostedParentView* hostedView = nil;
     NSMutableArray* observers = [NSMutableArray array];
     bool isGluing = false;
     bool needsGlue = false;

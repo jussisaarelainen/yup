@@ -73,6 +73,12 @@ SDLComponentNative::SDLComponentNative (Component& component,
     if (! component.isVisible())
         windowFlags |= SDL_WINDOW_HIDDEN;
 
+#if YUP_MAC
+    // Drawn in the host's view (NativeParentAttachment), the window is never shown
+    if (parent != nullptr && isHostedOutOfProcess())
+        windowFlags |= SDL_WINDOW_HIDDEN;
+#endif
+
     if (options.flags.test (allowHighDensityDisplay))
         windowFlags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
 
@@ -197,8 +203,14 @@ SDLComponentNative::SDLComponentNative (Component& component,
 
     if (parent != nullptr)
     {
+#if YUP_MAC
+        parentAttachment = std::make_unique<NativeParentAttachment> (parent, window, isHostedOutOfProcess() ? static_cast<HostedViewInput*> (this) : nullptr);
+#else
         parentAttachment = std::make_unique<NativeParentAttachment> (parent, window);
-        YUP_MODULE_DBG (GUI_WINDOWING, "SDL: attached to native parent");
+#endif
+        hostedViewVisible = component.isVisible();
+        parentAttachment->setHostedViewVisible (hostedViewVisible);
+        YUP_MODULE_DBG (GUI_WINDOWING, "SDL: attached to native parent" << String (drawsInHostView() ? ", drawing in the host view" : ""));
     }
 
 #if YUP_MAC
@@ -411,6 +423,17 @@ void SDLComponentNative::setVisible (bool shouldBeVisible)
 
     YUP_MODULE_DBG (GUI_WINDOWING, "SDL: setVisible " << String (shouldBeVisible ? "true" : "false") << ", currentFlags=" << String::toHexString (static_cast<int> (SDL_GetWindowFlags (window))));
 
+    if (drawsInHostView())
+    {
+        hostedViewVisible = shouldBeVisible;
+        parentAttachment->setHostedViewVisible (shouldBeVisible);
+
+        if (shouldBeVisible)
+            repaint();
+
+        return;
+    }
+
     if (shouldBeVisible)
     {
         SDL_ShowWindow (window);
@@ -440,7 +463,15 @@ void SDLComponentNative::setVisible (bool shouldBeVisible)
 
 bool SDLComponentNative::isVisible() const
 {
+    if (drawsInHostView())
+        return hostedViewVisible;
+
     return window != nullptr && (SDL_GetWindowFlags (window) & SDL_WINDOW_HIDDEN) == 0;
+}
+
+bool SDLComponentNative::drawsInHostView() const
+{
+    return parentAttachment != nullptr && parentAttachment->getHostedView() != nullptr;
 }
 
 //==============================================================================
@@ -494,6 +525,10 @@ void SDLComponentNative::setForeignOwner (uint64 ownerWindowId, int ownerProcess
 
 void SDLComponentNative::toFront()
 {
+    // Drawn in the host's view, the hidden window must never be shown
+    if (drawsInHostView())
+        return;
+
     if (window != nullptr && isVisible())
     {
         YUP_MODULE_DBG (GUI_WINDOWING, "SDL: raise window");
@@ -860,6 +895,13 @@ void SDLComponentNative::setFocusedComponent (Component* comp, FocusChangeType c
     {
         if (window != nullptr && isVisible() && lastComponentFocused != nullptr)
         {
+            // Drawn in the host's view, the view takes the keys: the hidden window must never be shown
+            if (drawsInHostView())
+            {
+                parentAttachment->focusHostedView();
+                return;
+            }
+
             SDL_RaiseWindow (window);
 
             focusNativeWindow (getNativeHandle());
@@ -1120,6 +1162,9 @@ Point<float> SDLComponentNative::getCursorPosition() const
 {
     YUP_ASSERT_MESSAGE_THREAD
 
+    if (drawsInHostView())
+        return hostedMousePosition;
+
     float x = 0, y = 0;
 
 #if YUP_MOBILE || YUP_EMSCRIPTEN
@@ -1157,6 +1202,9 @@ GraphicsContext* SDLComponentNative::getGraphicsContext()
 
 void* SDLComponentNative::getNativeHandle() const
 {
+    if (drawsInHostView())
+        return parentAttachment->getHostedView();
+
 #if YUP_ANDROID
     return getNativeWindowHandle (window);
 #else
@@ -1370,6 +1418,9 @@ void SDLComponentNative::runWithGraphicsContext (const std::function<void()>& fn
 
 void SDLComponentNative::timerCallback()
 {
+    if (drawsInHostView())
+        return;
+
 #if ! (YUP_MOBILE || YUP_EMSCRIPTEN)
     if (window != nullptr && ! cancelMouseGestureIfReleasedElsewhere()) // WIN ONLY: currentMouseButtons != MouseEvent::noButtons
     {
@@ -3666,6 +3717,72 @@ void SDLComponentNative::releaseMouseCapture()
 }
 
 //==============================================================================
+
+#if YUP_MAC
+void SDLComponentNative::hostedMouseMoved (Point<float> position)
+{
+    hostedMousePosition = position;
+    handleMouseMoveOrDrag (position);
+}
+
+void SDLComponentNative::hostedMouseDown (Point<float> position, MouseEvent::Buttons button, KeyModifiers modifiers)
+{
+    hostedMousePosition = position;
+    handleMouseDown (position, button, modifiers);
+}
+
+void SDLComponentNative::hostedMouseUp (Point<float> position, MouseEvent::Buttons button, KeyModifiers modifiers)
+{
+    hostedMousePosition = position;
+    handleMouseUp (position, button, modifiers);
+}
+
+void SDLComponentNative::hostedMouseEntered (Point<float> position)
+{
+    hostedMousePosition = position;
+    handleMouseEnter (position);
+}
+
+void SDLComponentNative::hostedMouseExited (Point<float> position)
+{
+    hostedMousePosition = position;
+    handleMouseLeave (position);
+}
+
+void SDLComponentNative::hostedMouseWheel (Point<float> position, const MouseWheelData& wheelData)
+{
+    hostedMousePosition = position;
+    handleMouseWheel (position, wheelData);
+}
+
+void SDLComponentNative::hostedKeyEvent (NSEvent* event)
+{
+    // SDL turns it into key and text input events for the window with the keyboard focus, this one's
+    Cocoa_HandleKeyEvent (SDL_GetVideoDevice(), event);
+}
+
+void SDLComponentNative::hostedKeyboardFocusChanged (bool hasFocus)
+{
+    // The hidden window has SDL's keyboard focus while the host view is the first responder
+    if (hasFocus)
+        SDL_SetKeyboardFocus (window);
+    else if (SDL_GetKeyboardFocus() == window)
+        SDL_SetKeyboardFocus (nullptr);
+}
+#endif
+
+//==============================================================================
+
+bool ComponentNative::canShowWindowsOfItsOwn()
+{
+#if YUP_IOS
+    return false;
+#elif YUP_MAC
+    return ! isHostedOutOfProcess();
+#else
+    return true;
+#endif
+}
 
 #if YUP_IOS
 // An embedded component on iOS has no SDL window: yup_Windowing_uikit.mm

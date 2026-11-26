@@ -27,6 +27,9 @@ class SDLComponentNative final
     : public ComponentNative
     , public Timer
     , public Thread
+#if YUP_MAC
+    , private HostedViewInput
+#endif
 {
     static constexpr size_t renderThreadStackSize = 8 * 1024 * 1024;
 
@@ -247,6 +250,20 @@ private:
             eventHandler();
     }
 
+#if YUP_MAC
+    void hostedMouseMoved (Point<float> position) override;
+    void hostedMouseDown (Point<float> position, MouseEvent::Buttons button, KeyModifiers modifiers) override;
+    void hostedMouseUp (Point<float> position, MouseEvent::Buttons button, KeyModifiers modifiers) override;
+    void hostedMouseEntered (Point<float> position) override;
+    void hostedMouseExited (Point<float> position) override;
+    void hostedMouseWheel (Point<float> position, const MouseWheelData& wheelData) override;
+    void hostedKeyEvent (NSEvent* event) override;
+    void hostedKeyboardFocusChanged (bool hasFocus) override;
+#endif
+
+    /** True when the component draws in the host's view itself, its window hidden (NativeParentAttachment). */
+    bool drawsInHostView() const;
+
     static bool requestMouseCapture();
     static void releaseMouseCapture();
     static void pollCapturedMouseState();
@@ -309,6 +326,8 @@ private:
 
     void* parentWindow = nullptr;
     std::unique_ptr<NativeParentAttachment> parentAttachment;
+    std::atomic_bool hostedViewVisible { false };
+    Point<float> hostedMousePosition;
     std::unique_ptr<ForeignOwnerTracker> foreignOwnerTracker;
     String windowTitle;
     uint32 windowFlags = 0;

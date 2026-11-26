@@ -163,8 +163,10 @@ public:
             return;
 
 #if YUP_MAC
-        NSWindow* nsWindow = (__bridge NSWindow*) window;
-        NSView* nsView = [nsWindow contentView];
+        // A window draws in its content view; a view (a plugin hosted out of process) in itself
+        id handle = (__bridge id) window;
+        NSView* nsView = [handle isKindOfClass:[NSView class]] ? (NSView*) handle : [(NSWindow*) handle contentView];
+        NSWindow* nsWindow = [nsView window];
         nsView.wantsLayer = YES;
 #endif
 
@@ -172,7 +174,7 @@ public:
         swapchain.device = gpu;
 
 #if YUP_MAC
-        swapchain.opaque = nsWindow.opaque;
+        swapchain.opaque = nsWindow != nil ? nsWindow.opaque : YES;
 #else
         swapchain.opaque = YES;
 #endif

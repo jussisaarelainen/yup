@@ -791,6 +791,14 @@ public:
                                            const Options& options,
                                            void* parent);
 
+    /** Returns true when a top-level component's window can appear on screen.
+
+        It can't on iOS, where an embedded editor has no window, nor in a plugin hosted out of process on macOS (an
+        AUv2 in a sandboxed host such as Logic Pro), where the host shows only the plugin's view. Popup menus then open
+        inside the component they are shown for.
+    */
+    static bool canShowWindowsOfItsOwn();
+
 protected:
     /** The Component associated with this native component. */
     Component& component;
