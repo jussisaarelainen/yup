@@ -837,14 +837,40 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
         if (unit == nullptr)
             return nullptr;
 
-        AudioBusLayout busLayout = makeBusLayout(desc, acd.componentType);
+        // A MIDI processor (aumi) has no audio in its description, but an AU MIDI effect may have an output bus
+        // (the ones wrapping a plugin with an audio output do): taken from the AU, so that it is rendered, as hosts
+        // render a MIDI effect to drive its processing (processBlock renders an AU with an output only)
+        auto loadedDesc = desc;
 
-        auto instance = std::make_unique<AUInstance>(desc, unit, std::move(busLayout));
+        if (acd.componentType == kAudioUnitType_MIDIProcessor && loadedDesc.numOutputChannels <= 0)
+            loadedDesc.numOutputChannels = getBusChannelCount(unit, kAudioUnitScope_Output);
+
+        AudioBusLayout busLayout = makeBusLayout(loadedDesc, acd.componentType);
+
+        auto instance = std::make_unique<AUInstance>(loadedDesc, unit, std::move(busLayout));
         instance->setNonRealtime(context.isNonRealtime);
         return instance;
     }
 
    private:
+    /** The channels of the first bus of a scope, or 0 when the AU has none there. */
+    static int getBusChannelCount(AudioUnit unit, AudioUnitScope scope)
+    {
+        UInt32 elementCount = 0;
+        UInt32 size = sizeof(elementCount);
+
+        if (AudioUnitGetProperty(unit, kAudioUnitProperty_ElementCount, scope, 0, &elementCount, &size) != noErr || elementCount == 0)
+            return 0;
+
+        AudioStreamBasicDescription format{};
+        size = sizeof(format);
+
+        if (AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, scope, 0, &format, &size) != noErr)
+            return 0;
+
+        return static_cast<int>(format.mChannelsPerFrame);
+    }
+
     static AudioBusLayout makeBusLayout(const AudioPluginDescription& desc, OSType componentType)
     {
         std::vector<AudioBus> inputs;
@@ -1231,7 +1257,12 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
             *outIsRecording = position->getIsRecording();
 
         if (outTransportStateChanged != nullptr)
-            *outTransportStateChanged = false;
+        {
+            // Changed since the AU last asked: started or stopped
+            const bool isPlaying = position->getIsPlaying();
+            *outTransportStateChanged = instance->lastReportedPlaying.has_value() && *instance->lastReportedPlaying != isPlaying;
+            instance->lastReportedPlaying = isPlaying;
+        }
 
         if (outCurrentSampleInTimeLine != nullptr)
         {
@@ -1242,21 +1273,18 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
             *outCurrentSampleInTimeLine = static_cast<Float64> (*timeInSamples);
         }
 
+        // A play head without loop points has no cycle: 0 to 0, not a failure of the whole call, which would leave
+        // the AU without the transport (AUs ask for the cycle along with the playing state)
+        const auto loopPoints = position->getLoopPoints();
+
         if (outIsCycling != nullptr)
-            *outIsCycling = position->getIsLooping();
+            *outIsCycling = loopPoints.has_value() && position->getIsLooping();
 
-        if (outCycleStartBeat != nullptr || outCycleEndBeat != nullptr)
-        {
-            const auto loopPoints = position->getLoopPoints();
-            if (! loopPoints.has_value())
-                return kAudioUnitErr_CannotDoInCurrentContext;
+        if (outCycleStartBeat != nullptr)
+            *outCycleStartBeat = loopPoints.has_value() ? loopPoints->ppqStart : 0.0;
 
-            if (outCycleStartBeat != nullptr)
-                *outCycleStartBeat = loopPoints->ppqStart;
-
-            if (outCycleEndBeat != nullptr)
-                *outCycleEndBeat = loopPoints->ppqEnd;
-        }
+        if (outCycleEndBeat != nullptr)
+            *outCycleEndBeat = loopPoints.has_value() ? loopPoints->ppqEnd : 0.0;
 
         return noErr;
     }
@@ -1534,6 +1562,7 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
     MidiBuffer* currentMidiOutputBuffer = nullptr;
     AudioPlayHead* currentPlayHead = nullptr;
     bool currentPlayHeadPositionQueried = false;
+    std::optional<bool> lastReportedPlaying;    // The playing state the AU was last given (transport state changed)
     std::optional<AudioPlayHead::PositionInfo> currentPlayHeadPosition;
     int currentInputNumChannels = 0;
     int currentInputNumSamples = 0;
