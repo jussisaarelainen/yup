@@ -845,6 +845,15 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
         if (acd.componentType == kAudioUnitType_MIDIProcessor && loadedDesc.numOutputChannels <= 0)
             loadedDesc.numOutputChannels = getBusChannelCount(unit, kAudioUnitScope_Output);
 
+        // An instrument's or a MIDI processor's input bus, if it has one (an instrument with a side input, or a
+        // wrapper of a plugin with audio inputs), and the MIDI output of any AU that has one: as the AU tells
+        if ((acd.componentType == kAudioUnitType_MusicDevice || acd.componentType == kAudioUnitType_MIDIProcessor)
+            && loadedDesc.numInputChannels <= 0)
+            loadedDesc.numInputChannels = getBusChannelCount(unit, kAudioUnitScope_Input);
+
+        if (loadedDesc.numMidiOutputPorts <= 0 && hasMidiOutput(unit))
+            loadedDesc.numMidiOutputPorts = 1;
+
         AudioBusLayout busLayout = makeBusLayout(loadedDesc, acd.componentType);
 
         auto instance = std::make_unique<AUInstance>(loadedDesc, unit, std::move(busLayout));
@@ -853,6 +862,21 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
     }
 
    private:
+    /** Whether the AU names MIDI outputs (kAudioUnitProperty_MIDIOutputCallbackInfo), which an instrument may have */
+    static bool hasMidiOutput(AudioUnit unit)
+    {
+        CFArrayRef names = nullptr;
+        UInt32 size = sizeof(names);
+
+        if (AudioUnitGetProperty(unit, kAudioUnitProperty_MIDIOutputCallbackInfo, kAudioUnitScope_Global, 0, &names, &size) != noErr
+            || names == nullptr)
+            return false;
+
+        const auto count = CFArrayGetCount(names);
+        CFRelease(names);
+        return count > 0;
+    }
+
     /** The channels of the first bus of a scope, or 0 when the AU has none there. */
     static int getBusChannelCount(AudioUnit unit, AudioUnitScope scope)
     {
@@ -1297,9 +1321,10 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
 
             if (message.isSysEx())
             {
+                // The whole message, F0 to F7, as MusicDeviceSysEx takes it
                 MusicDeviceSysEx(audioUnit,
-                                 message.getSysExData(),
-                                 static_cast<UInt32>(message.getSysExDataSize()));
+                                 metadata.data,
+                                 static_cast<UInt32>(metadata.numBytes));
                 continue;
             }
 
@@ -1330,9 +1355,35 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
 
         for (UInt32 i = 0; i < packetList->numPackets; ++i)
         {
-            instance->currentMidiOutputBuffer->addEvent(packet->data,
-                                                        packet->length,
-                                                        static_cast<int>(packet->timeStamp));
+            // A packet may hold several messages at its time (a note-off and a note-on, say): each one goes in, as
+            // a MidiBuffer keeps only the first message of the bytes it's given
+            const auto* data = packet->data;
+            const int size = static_cast<int>(packet->length);
+            const auto time = static_cast<int>(packet->timeStamp);
+
+            for (int offset = 0; offset < size;)
+            {
+                int length = 1;
+
+                if (data[offset] == 0xf0)
+                {
+                    while (offset + length < size && data[offset + length - 1] != 0xf7)
+                        ++length;
+                }
+                else if (data[offset] >= 0x80)
+                {
+                    length = jmin(size - offset, MidiMessage::getMessageLengthFromFirstByte(data[offset]));
+                }
+                else
+                {
+                    ++offset;   // a stray data byte (running status isn't used in packets)
+                    continue;
+                }
+
+                instance->currentMidiOutputBuffer->addEvent(data + offset, length, time);
+                offset += jmax(1, length);
+            }
+
             packet = MIDIPacketNext(packet);
         }
 
@@ -1409,16 +1460,59 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
             }
 
             const auto name = makeParameterName(info, paramId);
-            const auto range = makeParameterRange(info);
+            const bool isIndexed = info.unit == kAudioUnitParameterUnit_Indexed;
+            const bool isBoolean = info.unit == kAudioUnitParameterUnit_Boolean;
+            const bool hasValueStrings = (info.flags & kAudioUnitParameterFlag_ValuesHaveStrings) != 0;
+            auto range = makeParameterRange(info);
+
+            // Indexed and boolean parameters take whole values: stepped (indexed ones as an enum, with the AU's
+            // names of the values if it has them)
+            if ((isIndexed || isBoolean) && range.end > range.start)
+                range = NormalisableRange<float>(range.start, range.end, 1.0f);
+
+            auto valueStrings = std::make_shared<StringArray>(isIndexed ? getParameterValueStrings(paramId) : StringArray());
             releaseParameterInfoStrings(info);
 
-            auto param = AudioParameterBuilder()
-                             .withID(name + "_" + String(paramId))
-                             .withName(name)
-                             .withRange(range)
-                             .withDefault(info.defaultValue)
-                             .withSmoothing(0.0f)
-                             .build();
+            AudioParameterBuilder builder;
+            builder.withID(String(paramId))   // the AU's parameter id, as hosts know it
+                .withName(name)
+                .withRange(range)
+                .withDefault(info.defaultValue)
+                .withSmoothing(0.0f)
+                .withStepped(isIndexed || isBoolean)
+                .withEnum(isIndexed)
+                .withAutomatable((info.flags & kAudioUnitParameterFlag_NonRealTime) == 0);
+
+            if (! valueStrings->isEmpty() || hasValueStrings)
+            {
+                const auto minimum = range.start;
+
+                builder.withValueToString([this, paramId, valueStrings, minimum, hasValueStrings](float value)
+                {
+                    if (const auto index = roundToInt(value - minimum); isPositiveAndBelow(index, valueStrings->size()))
+                        return (*valueStrings)[index];
+
+                    if (hasValueStrings)
+                        if (const auto text = getParameterStringFromValue(paramId, value); text.isNotEmpty())
+                            return text;
+
+                    return String(value, 2);
+                });
+
+                builder.withStringToValue([this, paramId, valueStrings, minimum, hasValueStrings](const String& text)
+                {
+                    if (const auto index = valueStrings->indexOf(text); index >= 0)
+                        return minimum + static_cast<float>(index);
+
+                    if (hasValueStrings)
+                        if (const auto value = getParameterValueFromString(paramId, text))
+                            return *value;
+
+                    return text.getFloatValue();
+                });
+            }
+
+            auto param = builder.build();
 
             param->addListener(this);
 
@@ -1429,6 +1523,59 @@ class AUInstance : public AudioPluginInstance, private AudioParameter::Listener
         }
 
         syncParameterValuesFromAudioUnit();
+    }
+
+    /** The names of an indexed parameter's values (kAudioUnitProperty_ParameterValueStrings), if the AU has them */
+    StringArray getParameterValueStrings(AudioUnitParameterID paramId) const
+    {
+        StringArray strings;
+        CFArrayRef array = nullptr;
+        UInt32 size = sizeof(array);
+
+        if (AudioUnitGetProperty(audioUnit, kAudioUnitProperty_ParameterValueStrings, kAudioUnitScope_Global, paramId, &array, &size) != noErr
+            || array == nullptr)
+            return strings;
+
+        for (CFIndex i = 0; i < CFArrayGetCount(array); ++i)
+            strings.add(String::fromCFString(static_cast<CFStringRef>(CFArrayGetValueAtIndex(array, i))));
+
+        CFRelease(array);
+        return strings;
+    }
+
+    /** A value's text from the AU (kAudioUnitProperty_ParameterStringFromValue), or an empty string */
+    String getParameterStringFromValue(AudioUnitParameterID paramId, float value) const
+    {
+        AudioUnitParameterValue parameterValue = value;
+        AudioUnitParameterStringFromValue request{};
+        request.inParamID = paramId;
+        request.inValue = &parameterValue;
+        UInt32 size = sizeof(request);
+
+        if (AudioUnitGetProperty(audioUnit, kAudioUnitProperty_ParameterStringFromValue, kAudioUnitScope_Global, 0, &request, &size) != noErr
+            || request.outString == nullptr)
+            return {};
+
+        const auto text = String::fromCFString(request.outString);
+        CFRelease(request.outString);
+        return text;
+    }
+
+    /** A text's value from the AU (kAudioUnitProperty_ParameterValueFromString), if it can read it */
+    std::optional<float> getParameterValueFromString(AudioUnitParameterID paramId, const String& text) const
+    {
+        AudioUnitParameterValueFromString request{};
+        request.inParamID = paramId;
+        request.inString = text.toCFString();
+        UInt32 size = sizeof(request);
+
+        const auto result = AudioUnitGetProperty(audioUnit, kAudioUnitProperty_ParameterValueFromString, kAudioUnitScope_Global, 0, &request, &size);
+        CFRelease(request.inString);
+
+        if (result != noErr)
+            return std::nullopt;
+
+        return static_cast<float>(request.outValue);
     }
 
     void installParameterEventListener()
