@@ -52,6 +52,8 @@ public:
         static const Identifier paddingId;
         static const Identifier gapId;
         static const Identifier fitContentId;
+        static const Identifier fitWidthId;
+        static const Identifier fitHeightId;
         static const Identifier directionId;
         static const Identifier wrapId;
         static const Identifier justifyId;
@@ -119,6 +121,9 @@ public:
 
     /** Returns true if the container sizes itself to its children. */
     bool getFitContent() const;
+
+    /** Sets which of its sizes a fitting container fits (both by default): the other keeps its preferred size. */
+    void setFitAxes (bool shouldFitWidth, bool shouldFitHeight);
 
     //==============================================================================
     /** Lays the children out again. Called automatically when anything affecting the layout changes.

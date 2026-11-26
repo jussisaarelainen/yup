@@ -77,8 +77,8 @@ component LabeledKnob : Column {
 
 ### Shared container properties
 
-Every layout container inherits `padding`, `gap` and `fitContent` from
-`LayoutComponent`:
+Every layout container inherits `padding`, `gap`, `fitContent`, `fitWidth`
+and `fitHeight` from `LayoutComponent`:
 
 - `padding`: a single number (`12`) or a string of 1, 2 or 4 edge values in CSS
   top-right-bottom-left order (`"8 16"`, `"4 8 12 8"`).
@@ -89,6 +89,9 @@ Every layout container inherits `padding`, `gap` and `fitContent` from
   and the gap, and sets the result as its own preferred size, which its parent
   gives it. Nested fitting containers measure from the innermost out. `Row`,
   `Column`, `FlexBox` (as one line) and `Stack` fit; a `Grid` keeps its size.
+- `fitWidth`, `fitHeight`: which sizes `fitContent` fits (both `true` by
+  default). With `fitWidth: false`, a container keeps its `preferredWidth` and
+  fits only its height.
 
 ```yui
 Row {

@@ -25,6 +25,8 @@ namespace yup
 const Identifier LayoutComponent::Properties::paddingId ("padding");
 const Identifier LayoutComponent::Properties::gapId ("gap");
 const Identifier LayoutComponent::Properties::fitContentId ("fitContent");
+const Identifier LayoutComponent::Properties::fitWidthId ("fitWidth");
+const Identifier LayoutComponent::Properties::fitHeightId ("fitHeight");
 const Identifier LayoutComponent::Properties::directionId ("direction");
 const Identifier LayoutComponent::Properties::wrapId ("wrap");
 const Identifier LayoutComponent::Properties::justifyId ("justify");
@@ -120,6 +122,12 @@ bool LayoutComponent::getFitContent() const
     return findPropertyAs<bool> (Properties::fitContentId);
 }
 
+void LayoutComponent::setFitAxes (bool shouldFitWidth, bool shouldFitHeight)
+{
+    setProperty (Properties::fitWidthId, shouldFitWidth);
+    setProperty (Properties::fitHeightId, shouldFitHeight);
+}
+
 //==============================================================================
 
 void LayoutComponent::updateLayout()
@@ -171,10 +179,10 @@ void LayoutComponent::fitToContent()
     const auto width = static_cast<double> (content->getWidth() + padding.getLeft() + padding.getRight());
     const auto height = static_cast<double> (content->getHeight() + padding.getTop() + padding.getBottom());
 
-    if (findPropertyAs<double> (Properties::preferredWidthId) != width)
+    if (findPropertyAs<bool> (Properties::fitWidthId) && findPropertyAs<double> (Properties::preferredWidthId) != width)
         setProperty (Properties::preferredWidthId, width);
 
-    if (findPropertyAs<double> (Properties::preferredHeightId) != height)
+    if (findPropertyAs<bool> (Properties::fitHeightId) && findPropertyAs<double> (Properties::preferredHeightId) != height)
         setProperty (Properties::preferredHeightId, height);
 }
 
@@ -189,6 +197,8 @@ const ComponentTypeInfo& LayoutComponent::getClassTypeInfo()
                                  .layoutProperty (Properties::paddingId, Type::any, 0.0, LayoutEffect::own, "The space kept inside the bounds: a number, or 1, 2 or 4 values (top right bottom left).")
                                  .layoutProperty (Properties::gapId, Type::number, 0.0, LayoutEffect::own, "The space kept between the children.")
                                  .layoutProperty (Properties::fitContentId, Type::boolean, false, LayoutEffect::own, "Whether the container sets its preferred size to what its children need, plus its padding.")
+                                 .layoutProperty (Properties::fitWidthId, Type::boolean, true, LayoutEffect::own, "Whether fitContent fits the width; else it keeps its preferredWidth.")
+                                 .layoutProperty (Properties::fitHeightId, Type::boolean, true, LayoutEffect::own, "Whether fitContent fits the height; else it keeps its preferredHeight.")
                                  .build();
 
     return info;

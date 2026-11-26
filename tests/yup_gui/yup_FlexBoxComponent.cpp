@@ -153,6 +153,31 @@ TEST_F (FlexBoxComponentTests, FitsARowToItsChildren)
     EXPECT_FLOAT_EQ (row.findPropertyAs<float> (Identifier ("preferredHeight")), 4.0f + 20.0f + 4.0f);
 }
 
+TEST_F (FlexBoxComponentTests, FitsOnlyTheAxesItIsAskedTo)
+{
+    RowComponent row;
+    row.addAndMakeVisible (first);
+    row.addAndMakeVisible (second);
+
+    first.setProperty (Identifier ("preferredWidth"), 30.0);
+    first.setProperty (Identifier ("preferredHeight"), 20.0);
+    second.setProperty (Identifier ("preferredWidth"), 40.0);
+    second.setProperty (Identifier ("preferredHeight"), 10.0);
+
+    row.setProperty (Identifier ("preferredWidth"), 100.0);
+    row.setFitAxes (false, true);
+    row.setFitContent (true);
+
+    EXPECT_FLOAT_EQ (row.findPropertyAs<float> (Identifier ("preferredWidth")), 100.0f);
+    EXPECT_FLOAT_EQ (row.findPropertyAs<float> (Identifier ("preferredHeight")), 20.0f);
+
+    // Its width stays when the children it would fit to are hidden
+    first.setVisible (false);
+    second.setVisible (false);
+
+    EXPECT_FLOAT_EQ (row.findPropertyAs<float> (Identifier ("preferredWidth")), 100.0f);
+}
+
 TEST_F (FlexBoxComponentTests, FitsNestedContainersFromTheInnermostOut)
 {
     ColumnComponent column;
